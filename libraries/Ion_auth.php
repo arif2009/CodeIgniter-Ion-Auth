@@ -1,37 +1,67 @@
-<?php
+<?php  if ( ! defined('BASEPATH')) exit('No direct script access allowed');
 /**
- * Name:    Ion Auth
- * Author:  Ben Edmunds
- *           ben.edmunds@gmail.com
- *           @benedmunds
- *
- * Added Awesomeness: Phil Sturgeon
- *
- * Created:  10.01.2009
- *
- * Description:  Modified auth system based on redux_auth with extensive customization. This is basically what Redux Auth 2 should be.
- * Original Author name has been kept but that does not mean that the method has not been modified.
- *
- * Requirements: PHP5 or above
- *
- * @package    CodeIgniter-Ion-Auth
- * @author     Ben Edmunds
- * @link       http://github.com/benedmunds/CodeIgniter-Ion-Auth
- * @filesource
- */
-defined('BASEPATH') OR exit('No direct script access allowed');
+* Name:  Ion Auth
+*
+* Author: Ben Edmunds
+*		  ben.edmunds@gmail.com
+*         @benedmunds
+*
+* Added Awesomeness: Phil Sturgeon
+*
+* Location: http://github.com/benedmunds/CodeIgniter-Ion-Auth
+*
+* Created:  10.01.2009
+*
+* Description:  Modified auth system based on redux_auth with extensive customization.  This is basically what Redux Auth 2 should be.
+* Original Author name has been kept but that does not mean that the method has not been modified.
+*
+* Requirements: PHP5 or above
+*
+*/
 
-/**
- * Class Ion_auth
- */
 class Ion_auth
 {
+	/**
+	 * CodeIgniter global
+	 *
+	 * @var string
+	 **/
+	protected $ci;
+
 	/**
 	 * account status ('not_activated', etc ...)
 	 *
 	 * @var string
 	 **/
 	protected $status;
+
+	/**
+	 * message (uses lang file)
+	 *
+	 * @var string
+	 **/
+	protected $messages;
+
+	/**
+	 * error message (uses lang file)
+	 *
+	 * @var string
+	 **/
+	protected $errors = array();
+
+	/**
+	 * error start delimiter
+	 *
+	 * @var string
+	 **/
+	protected $error_start_delimiter;
+
+	/**
+	 * error end delimiter
+	 *
+	 * @var string
+	 **/
+	protected $error_end_delimiter;
 
 	/**
 	 * extra where
@@ -48,38 +78,34 @@ class Ion_auth
 	public $_extra_set = array();
 
 	/**
-	 * caching of users and their groups
-	 *
-	 * @var array
-	 **/
-	public $_cache_user_in_group;
-
-	/**
 	 * __construct
 	 *
-	 * @author Ben
-	 */
+	 * @return void
+	 * @author Mathew
+	 **/
 	public function __construct()
 	{
-		$this->config->load('ion_auth', TRUE);
-		$this->load->library(array('email'));
-		$this->lang->load('ion_auth');
-		$this->load->helper(array('cookie', 'language','url'));
+		$this->ci =& get_instance();
+		$this->ci->load->config('ion_auth', TRUE);
+		$this->ci->load->library('email');
+		$this->ci->load->library('session');
+		$this->ci->lang->load('ion_auth');
+		$this->ci->load->model('ion_auth_model');
+		$this->ci->load->helper('cookie');
 
-		$this->load->library('session');
+		$this->messages = array();
+		$this->errors = array();
+		$this->message_start_delimiter = $this->ci->config->item('message_start_delimiter', 'ion_auth');
+		$this->message_end_delimiter   = $this->ci->config->item('message_end_delimiter', 'ion_auth');
+		$this->error_start_delimiter   = $this->ci->config->item('error_start_delimiter', 'ion_auth');
+		$this->error_end_delimiter     = $this->ci->config->item('error_end_delimiter', 'ion_auth');
 
-		$this->load->model('ion_auth_model');
-
-		$this->_cache_user_in_group =& $this->ion_auth_model->_cache_user_in_group;
-	
-		$email_config = $this->config->item('email_config', 'ion_auth');
-
-		if ($this->config->item('use_ci_email', 'ion_auth') && isset($email_config) && is_array($email_config))
+		//auto-login the user if they are remembered
+		if (!$this->logged_in() && get_cookie('identity') && get_cookie('remember_code'))
 		{
-			$this->email->initialize($email_config);
+			$this->ci->ion_auth = $this;
+			$this->ci->ion_auth_model->login_remembered_user();
 		}
-
-		$this->ion_auth_model->trigger_events('library_constructor');
 	}
 
 	/**
@@ -87,93 +113,107 @@ class Ion_auth
 	 *
 	 * Acts as a simple way to call model methods without loads of stupid alias'
 	 *
-	 * @param string $method
-	 * @param array  $arguments
-	 *
-	 * @return mixed
-	 * @throws Exception
-	 */
+	 **/
 	public function __call($method, $arguments)
 	{
-		if (!method_exists( $this->ion_auth_model, $method) )
+		if (!method_exists( $this->ci->ion_auth_model, $method) )
 		{
 			throw new Exception('Undefined method Ion_auth::' . $method . '() called');
 		}
-		if($method == 'create_user')
-		{
-			return call_user_func_array(array($this, 'register'), $arguments);
-		}
-		if($method=='update_user')
-		{
-			return call_user_func_array(array($this, 'update'), $arguments);
-		}
-		return call_user_func_array( array($this->ion_auth_model, $method), $arguments);
+
+		return call_user_func_array( array($this->ci->ion_auth_model, $method), $arguments);
 	}
 
 	/**
-	 * __get
+	 * Activate user.
 	 *
-	 * Enables the use of CI super-global without having to define an extra variable.
-	 *
-	 * I can't remember where I first saw this, so thank you if you are the original author. -Militis
-	 *
-	 * @param    string $var
-	 *
-	 * @return    mixed
-	 */
-	public function __get($var)
-	{
-		return get_instance()->$var;
-	}
-
-	/**
-	 * Forgotten password feature
-	 *
-	 * @param string $identity
-	 *
-	 * @return array|bool
+	 * @return void
 	 * @author Mathew
-	 */
-	public function forgotten_password($identity)
+	 **/
+	public function activate($id, $code=false)
 	{
-		if ($this->ion_auth_model->forgotten_password($identity))
+		if ($this->ci->ion_auth_model->activate($id, $code))
 		{
-			// Get user information
-			$identifier = $this->ion_auth_model->identity_column; // use model identity column, so it can be overridden in a controller
-			$user = $this->where($identifier, $identity)->where('active', 1)->users()->row();
+			$this->set_message('activate_successful');
+			return TRUE;
+		}
 
-			if ($user)
+		$this->set_error('activate_unsuccessful');
+		return FALSE;
+	}
+
+	/**
+	 * Deactivate user.
+	 *
+	 * @return void
+	 * @author Mathew
+	 **/
+	public function deactivate($id)
+	{
+		if ($this->ci->ion_auth_model->deactivate($id))
+		{
+			$this->set_message('deactivate_successful');
+			return TRUE;
+		}
+
+		$this->set_error('deactivate_unsuccessful');
+		return FALSE;
+	}
+
+	/**
+	 * Change password.
+	 *
+	 * @return void
+	 * @author Mathew
+	 **/
+	public function change_password($identity, $old, $new)
+	{
+		if ($this->ci->ion_auth_model->change_password($identity, $old, $new))
+		{
+			$this->set_message('password_change_successful');
+			return TRUE;
+		}
+
+		$this->set_error('password_change_unsuccessful');
+		return FALSE;
+	}
+
+	/**
+	 * forgotten password feature
+	 *
+	 * @return void
+	 * @author Mathew
+	 **/
+	public function forgotten_password($identity)    //changed $email to $identity
+	{
+		// Get user information
+		//get the details of the user, and thus his email address **before** sending a request to the model
+		$user = $this->get_user_by_identity($identity);
+		$email = $user->email;
+		
+		if ( $this->ci->ion_auth_model->forgotten_password($email) )   //changed
+		{
+                        //we are doing this again to get the correct password reset request code
+                        $user = $this->get_user_by_identity($identity);
+			$data = array(
+				'identity'		=> $user->{$this->ci->config->item('identity', 'ion_auth')},
+				'forgotten_password_code' => $this->ci->ion_auth_model->forgotten_password_code,
+			);
+
+			$message = $this->ci->load->view($this->ci->config->item('email_templates', 'ion_auth').$this->ci->config->item('email_forgot_password', 'ion_auth'), $data, true);
+			$this->ci->email->clear();
+			$config['mailtype'] = $this->ci->config->item('email_type', 'ion_auth');
+			$this->ci->email->initialize($config);
+			$this->ci->email->set_newline("\r\n");
+			$this->ci->email->from($this->ci->config->item('admin_email', 'ion_auth'), $this->ci->config->item('site_title', 'ion_auth'));
+			$this->ci->email->to($user->email);
+			$this->ci->email->subject($this->ci->config->item('site_title', 'ion_auth') . ' - Forgotten Password Verification');
+			$this->ci->email->message($message);
+
+			if ($this->ci->email->send())
 			{
-				$data = array(
-					'identity' => $user->{$this->config->item('identity', 'ion_auth')},
-					'forgotten_password_code' => $user->forgotten_password_code
-				);
-
-				if (!$this->config->item('use_ci_email', 'ion_auth'))
-				{
-					$this->set_message('forgot_password_successful');
-					return $data;
-				}
-				else
-				{
-					$message = $this->load->view($this->config->item('email_templates', 'ion_auth') . $this->config->item('email_forgot_password', 'ion_auth'), $data, TRUE);
-					$this->email->clear();
-					$this->email->from($this->config->item('admin_email', 'ion_auth'), $this->config->item('site_title', 'ion_auth'));
-					$this->email->to($user->email);
-					$this->email->subject($this->config->item('site_title', 'ion_auth') . ' - ' . $this->lang->line('email_forgotten_password_subject'));
-					$this->email->message($message);
-
-					if ($this->email->send())
-					{
-						$this->set_message('forgot_password_successful');
-						return TRUE;
-					}
-					else
-					{
-						$this->set_error('forgot_password_unsuccessful');
-						return FALSE;
-					}
-				}
+				$this->set_message('forgot_password_successful');
+				return TRUE;
 			}
 			else
 			{
@@ -191,26 +231,21 @@ class Ion_auth
 	/**
 	 * forgotten_password_complete
 	 *
-	 * @param string $code
-	 *
-	 * @return array|bool
+	 * @return void
 	 * @author Mathew
-	 */
+	 **/
 	public function forgotten_password_complete($code)
 	{
-		$this->ion_auth_model->trigger_events('pre_password_change');
+		$identity = $this->ci->config->item('identity', 'ion_auth');
+		$profile  = $this->ci->ion_auth_model->profile($code, true); //pass the code to profile
 
-		$identity = $this->config->item('identity', 'ion_auth');
-		$profile  = $this->where('forgotten_password_code', $code)->users()->row(); // pass the code to profile
-
-		if (!$profile)
+		if (!is_object($profile))
 		{
-			$this->ion_auth_model->trigger_events(array('post_password_change', 'password_change_unsuccessful'));
 			$this->set_error('password_change_unsuccessful');
 			return FALSE;
 		}
 
-		$new_password = $this->ion_auth_model->forgotten_password_complete($code, $profile->salt);
+		$new_password = $this->ci->ion_auth_model->forgotten_password_complete($code, $profile->salt);
 
 		if ($new_password)
 		{
@@ -218,139 +253,79 @@ class Ion_auth
 				'identity'     => $profile->{$identity},
 				'new_password' => $new_password
 			);
-			if(!$this->config->item('use_ci_email', 'ion_auth'))
+
+			$message = $this->ci->load->view($this->ci->config->item('email_templates', 'ion_auth').$this->ci->config->item('email_forgot_password_complete', 'ion_auth'), $data, true);
+
+			$this->ci->email->clear();
+			$config['mailtype'] = $this->ci->config->item('email_type', 'ion_auth');
+			$this->ci->email->initialize($config);
+			$this->ci->email->set_newline("\r\n");
+			$this->ci->email->from($this->ci->config->item('admin_email', 'ion_auth'), $this->ci->config->item('site_title', 'ion_auth'));
+			$this->ci->email->to($profile->email);
+			$this->ci->email->subject($this->ci->config->item('site_title', 'ion_auth') . ' - New Password');
+			$this->ci->email->message($message);
+
+			if ($this->ci->email->send())
 			{
 				$this->set_message('password_change_successful');
-				$this->ion_auth_model->trigger_events(array('post_password_change', 'password_change_successful'));
-				return $data;
+				return TRUE;
 			}
 			else
 			{
-				$message = $this->load->view($this->config->item('email_templates', 'ion_auth').$this->config->item('email_forgot_password_complete', 'ion_auth'), $data, true);
-
-				$this->email->clear();
-				$this->email->from($this->config->item('admin_email', 'ion_auth'), $this->config->item('site_title', 'ion_auth'));
-				$this->email->to($profile->email);
-				$this->email->subject($this->config->item('site_title', 'ion_auth') . ' - ' . $this->lang->line('email_new_password_subject'));
-				$this->email->message($message);
-
-				if ($this->email->send())
-				{
-					$this->set_message('password_change_successful');
-					$this->ion_auth_model->trigger_events(array('post_password_change', 'password_change_successful'));
-					return TRUE;
-				}
-				else
-				{
-					$this->set_error('password_change_unsuccessful');
-					$this->ion_auth_model->trigger_events(array('post_password_change', 'password_change_unsuccessful'));
-					return FALSE;
-				}
-
+				$this->set_error('password_change_unsuccessful');
+				return FALSE;
 			}
 		}
 
-		$this->ion_auth_model->trigger_events(array('post_password_change', 'password_change_unsuccessful'));
+		$this->set_error('password_change_unsuccessful');
 		return FALSE;
-	}
-
-	/**
-	 * forgotten_password_check
-	 *
-	 * @param string $code
-	 *
-	 * @return object|bool
-	 * @author Michael
-	 */
-	public function forgotten_password_check($code)
-	{
-		$profile = $this->where('forgotten_password_code', $code)->users()->row(); // pass the code to profile
-
-		if (!is_object($profile))
-		{
-			$this->set_error('password_change_unsuccessful');
-			return FALSE;
-		}
-		else
-		{
-			if ($this->config->item('forgot_password_expiration', 'ion_auth') > 0)
-			{
-				//Make sure it isn't expired
-				$expiration = $this->config->item('forgot_password_expiration', 'ion_auth');
-				if (time() - $profile->forgotten_password_time > $expiration)
-				{
-					//it has expired
-					$this->ion_auth_model->clear_forgotten_password_code($code);
-					$this->set_error('password_change_unsuccessful');
-					return FALSE;
-				}
-			}
-			return $profile;
-		}
 	}
 
 	/**
 	 * register
 	 *
-	 * @param string $identity
-	 * @param string $password
-	 * @param string $email
-	 * @param array  $additional_data
-	 * @param array  $group_ids
-	 *
-	 * @return int|array|bool The new user's ID if e-mail activation is disabled or Ion-Auth e-mail activation was
-	 *                        completed; or an array of activation details if CI e-mail validation is enabled; or FALSE
-	 *                        if the operation failed.
+	 * @return void
 	 * @author Mathew
-	 */
-	public function register($identity, $password, $email, $additional_data = array(), $group_ids = array())
+	 **/
+	public function register($username, $password, $email, $additional_data, $group_name = false) //need to test email activation
 	{
-		$this->ion_auth_model->trigger_events('pre_account_creation');
-
-		$email_activation = $this->config->item('email_activation', 'ion_auth');
-
-		$id = $this->ion_auth_model->register($identity, $password, $email, $additional_data, $group_ids);
+		$email_activation = $this->ci->config->item('email_activation', 'ion_auth');
 
 		if (!$email_activation)
 		{
+			$id = $this->ci->ion_auth_model->register($username, $password, $email, $additional_data, $group_name);
 			if ($id !== FALSE)
 			{
 				$this->set_message('account_creation_successful');
-				$this->ion_auth_model->trigger_events(array('post_account_creation', 'post_account_creation_successful'));
 				return $id;
 			}
 			else
 			{
 				$this->set_error('account_creation_unsuccessful');
-				$this->ion_auth_model->trigger_events(array('post_account_creation', 'post_account_creation_unsuccessful'));
 				return FALSE;
 			}
 		}
 		else
 		{
+			$id = $this->ci->ion_auth_model->register($username, $password, $email, $additional_data, $group_name);
+
 			if (!$id)
 			{
 				$this->set_error('account_creation_unsuccessful');
 				return FALSE;
 			}
 
-			// deactivate so the user much follow the activation flow
-			$deactivate = $this->ion_auth_model->deactivate($id);
-
-			// the deactivate method call adds a message, here we need to clear that
-			$this->ion_auth_model->clear_messages();
-
+			$deactivate = $this->ci->ion_auth_model->deactivate($id);
 
 			if (!$deactivate)
 			{
 				$this->set_error('deactivate_unsuccessful');
-				$this->ion_auth_model->trigger_events(array('post_account_creation', 'post_account_creation_unsuccessful'));
 				return FALSE;
 			}
 
-			$activation_code = $this->ion_auth_model->activation_code;
-			$identity        = $this->config->item('identity', 'ion_auth');
-			$user            = $this->ion_auth_model->user($id)->row();
+			$activation_code = $this->ci->ion_auth_model->activation_code;
+			$identity        = $this->ci->config->item('identity', 'ion_auth');
+			$user            = $this->ci->ion_auth_model->get_user($id)->row();
 
 			$data = array(
 				'identity'   => $user->{$identity},
@@ -358,194 +333,481 @@ class Ion_auth
 				'email'      => $email,
 				'activation' => $activation_code,
 			);
-			if(!$this->config->item('use_ci_email', 'ion_auth'))
+
+			$message = $this->ci->load->view($this->ci->config->item('email_templates', 'ion_auth').$this->ci->config->item('email_activate', 'ion_auth'), $data, true);
+
+			$this->ci->email->clear();
+			$config['mailtype'] = $this->ci->config->item('email_type', 'ion_auth');
+			$this->ci->email->initialize($config);
+			$this->ci->email->set_newline("\r\n");
+			$this->ci->email->from($this->ci->config->item('admin_email', 'ion_auth'), $this->ci->config->item('site_title', 'ion_auth'));
+			$this->ci->email->to($email);
+			$this->ci->email->subject($this->ci->config->item('site_title', 'ion_auth') . ' - Account Activation');
+			$this->ci->email->message($message);
+
+			if ($this->ci->email->send() == TRUE)
 			{
-				$this->ion_auth_model->trigger_events(array('post_account_creation', 'post_account_creation_successful', 'activation_email_successful'));
 				$this->set_message('activation_email_successful');
-				return $data;
-			}
-			else
-			{
-				$message = $this->load->view($this->config->item('email_templates', 'ion_auth').$this->config->item('email_activate', 'ion_auth'), $data, true);
-
-				$this->email->clear();
-				$this->email->from($this->config->item('admin_email', 'ion_auth'), $this->config->item('site_title', 'ion_auth'));
-				$this->email->to($email);
-				$this->email->subject($this->config->item('site_title', 'ion_auth') . ' - ' . $this->lang->line('email_activation_subject'));
-				$this->email->message($message);
-
-				if ($this->email->send() === TRUE)
-				{
-					$this->ion_auth_model->trigger_events(array('post_account_creation', 'post_account_creation_successful', 'activation_email_successful'));
-					$this->set_message('activation_email_successful');
-					return $id;
-				}
-
+				return $id;
 			}
 
-			$this->ion_auth_model->trigger_events(array('post_account_creation', 'post_account_creation_unsuccessful', 'activation_email_unsuccessful'));
 			$this->set_error('activation_email_unsuccessful');
 			return FALSE;
 		}
 	}
 
 	/**
-	 * Logout
+	 * login
 	 *
-	 * @return true
+	 * @return void
+	 * @author Mathew
+	 **/
+	public function login($identity, $password, $remember=false)
+	{
+		if ($this->ci->ion_auth_model->login($identity, $password, $remember))
+		{
+			$this->set_message('login_successful');
+			return TRUE;
+		}
+
+		$this->set_error('login_unsuccessful');
+		return FALSE;
+	}
+
+	/**
+	 * logout
+	 *
+	 * @return void
 	 * @author Mathew
 	 **/
 	public function logout()
 	{
-		$this->ion_auth_model->trigger_events('logout');
+		$identity = $this->ci->config->item('identity', 'ion_auth');
+		$this->ci->session->unset_userdata($identity);
+		$this->ci->session->unset_userdata('group');
+		$this->ci->session->unset_userdata('id');
+		$this->ci->session->unset_userdata('user_id');
 
-		$identity = $this->config->item('identity', 'ion_auth');
-
-		if (substr(CI_VERSION, 0, 1) == '2')
+		//delete the remember me cookies if they exist
+		if (get_cookie('identity'))
 		{
-			$this->session->unset_userdata(array($identity => '', 'id' => '', 'user_id' => ''));
+			delete_cookie('identity');
 		}
-		else
+		if (get_cookie('remember_code'))
 		{
-			$this->session->unset_userdata(array($identity, 'id', 'user_id'));
-		}
-
-		// delete the remember me cookies if they exist
-		if (get_cookie($this->config->item('identity_cookie_name', 'ion_auth')))
-		{
-			delete_cookie($this->config->item('identity_cookie_name', 'ion_auth'));
-		}
-		if (get_cookie($this->config->item('remember_cookie_name', 'ion_auth')))
-		{
-			delete_cookie($this->config->item('remember_cookie_name', 'ion_auth'));
+			delete_cookie('remember_code');
 		}
 
-		// Destroy the session
-		$this->session->sess_destroy();
-
-		//Recreate the session
-		if (substr(CI_VERSION, 0, 1) == '2')
-		{
-			$this->session->sess_create();
-		}
-		else
-		{
-			if (version_compare(PHP_VERSION, '7.0.0') >= 0)
-			{
-				session_start();
-			}
-			$this->session->sess_regenerate(TRUE);
-		}
+		$this->ci->session->sess_destroy();
 
 		$this->set_message('logout_successful');
 		return TRUE;
 	}
 
 	/**
-	 * Auto logs-in the user if they are remembered
-	 * @return bool Whether the user is logged in
+	 * logged_in
+	 *
+	 * @return bool
 	 * @author Mathew
 	 **/
 	public function logged_in()
 	{
-		$this->ion_auth_model->trigger_events('logged_in');
+		$identity = $this->ci->config->item('identity', 'ion_auth');
 
-		$recheck = $this->ion_auth_model->recheck_session();
-
-		// auto-login the user if they are remembered
-		if (!$recheck && get_cookie($this->config->item('identity_cookie_name', 'ion_auth')) && get_cookie($this->config->item('remember_cookie_name', 'ion_auth')))
-		{
-			$recheck = $this->ion_auth_model->login_remembered_user();
-		}
-
-		return $recheck;
+		return (bool) $this->ci->session->userdata($identity);
 	}
 
 	/**
-	 * @return int|null The user's ID from the session user data or NULL if not found
-	 * @author jrmadsen67
-	 **/
-	public function get_user_id()
-	{
-		$user_id = $this->session->userdata('user_id');
-		if (!empty($user_id))
-		{
-			return $user_id;
-		}
-		return NULL;
-	}
-
-	/**
-	 * @param int|string|bool $id
+	 * is_admin
 	 *
-	 * @return bool Whether the user is an administrator
+	 * @return bool
 	 * @author Ben Edmunds
-	 */
-	public function is_admin($id = FALSE)
+	 **/
+	public function is_admin()
 	{
-		$this->ion_auth_model->trigger_events('is_admin');
+		$admin_group = $this->ci->config->item('admin_group', 'ion_auth');
+		$user_group  = $this->ci->session->userdata('group');
 
-		$admin_group = $this->config->item('admin_group', 'ion_auth');
-
-		return $this->in_group($admin_group, $id);
+		return $user_group == $admin_group;
 	}
 
 	/**
-	 * @param int|string|array $check_group group(s) to check
-	 * @param int|string|bool  $id          user id
-	 * @param bool             $check_all   check if all groups is present, or any of the groups
+	 * is_group
 	 *
-	 * @return bool Whether the/all user(s) with the given ID(s) is/are in the given group
+	 * @return bool
 	 * @author Phil Sturgeon
 	 **/
-	public function in_group($check_group, $id = FALSE, $check_all = FALSE)
+	public function is_group($check_group)
 	{
-		$this->ion_auth_model->trigger_events('in_group');
+		$user_group = $this->ci->session->userdata('group');
 
-		$id || $id = $this->session->userdata('user_id');
-
-		if (!is_array($check_group))
+		if(is_array($check_group))
 		{
-			$check_group = array($check_group);
+			return in_array($user_group, $check_group);
 		}
 
-		if (isset($this->_cache_user_in_group[$id]))
-		{
-			$groups_array = $this->_cache_user_in_group[$id];
-		}
-		else
-		{
-			$users_groups = $this->ion_auth_model->get_users_groups($id)->result();
-			$groups_array = array();
-			foreach ($users_groups as $group)
-			{
-				$groups_array[$group->id] = $group->name;
-			}
-			$this->_cache_user_in_group[$id] = $groups_array;
-		}
-		foreach ($check_group as $key => $value)
-		{
-			$groups = (is_string($value)) ? $groups_array : array_keys($groups_array);
+		return $user_group == $check_group;
+	}
 
-			/**
-			 * if !all (default), in_array
-			 * if all, !in_array
-			 */
-			if (in_array($value, $groups) xor $check_all)
-			{
-				/**
-				 * if !all (default), true
-				 * if all, false
-				 */
-				return !$check_all;
-			}
+	/**
+	 * Profile
+	 *
+	 * @return void
+	 * @author Mathew
+	 **/
+	public function profile()
+	{
+		$session  = $this->ci->config->item('identity', 'ion_auth');
+		$identity = $this->ci->session->userdata($session);
+
+		return $this->ci->ion_auth_model->profile($identity);
+	}
+
+	/**
+	 * Get Users
+	 *
+	 * @return object Users
+	 * @author Ben Edmunds
+	 **/
+	public function get_users($group_name=false, $limit=NULL, $offset=NULL)
+	{
+		return $this->ci->ion_auth_model->get_users($group_name, $limit, $offset)->result();
+	}
+
+	/**
+	 * Get Number of Users
+	 *
+	 * @return int Number of Users
+	 * @author Sven Lueckenbach
+	 **/
+	public function get_users_count($group_name=false)
+	{
+		return $this->ci->ion_auth_model->get_users_count($group_name);
+	}
+
+	/**
+	 * Get Users Array
+	 *
+	 * @return array Users
+	 * @author Ben Edmunds
+	 **/
+	public function get_users_array($group_name=false, $limit=NULL, $offset=NULL)
+	{
+		return $this->ci->ion_auth_model->get_users($group_name, $limit, $offset)->result_array();
+	}
+
+	/**
+	 * Get Newest Users
+	 *
+	 * @return object Users
+	 * @author Ben Edmunds
+	 **/
+	public function get_newest_users($limit = 10)
+	{
+		return $this->ci->ion_auth_model->get_newest_users($limit)->result();
+	}
+
+	/**
+	 * Get Newest Users Array
+	 *
+	 * @return object Users
+	 * @author Ben Edmunds
+	 **/
+	public function get_newest_users_array($limit = 10)
+	{
+		return $this->ci->ion_auth_model->get_newest_users($limit)->result_array();
+	}
+
+	/**
+	 * Get Active Users
+	 *
+	 * @return object Users
+	 * @author Ben Edmunds
+	 **/
+	public function get_active_users($group_name = false)
+	{
+		return $this->ci->ion_auth_model->get_active_users($group_name)->result();
+	}
+
+	/**
+	 * Get Active Users Array
+	 *
+	 * @return object Users
+	 * @author Ben Edmunds
+	 **/
+	public function get_active_users_array($group_name = false)
+	{
+		return $this->ci->ion_auth_model->get_active_users($group_name)->result_array();
+	}
+
+	/**
+	 * Get In-Active Users
+	 *
+	 * @return object Users
+	 * @author Ben Edmunds
+	 **/
+	public function get_inactive_users($group_name = false)
+	{
+		return $this->ci->ion_auth_model->get_inactive_users($group_name)->result();
+	}
+
+	/**
+	 * Get In-Active Users Array
+	 *
+	 * @return object Users
+	 * @author Ben Edmunds
+	 **/
+	public function get_inactive_users_array($group_name = false)
+	{
+		return $this->ci->ion_auth_model->get_inactive_users($group_name)->result_array();
+	}
+
+	/**
+	 * Get User
+	 *
+	 * @return object User
+	 * @author Ben Edmunds
+	 **/
+	public function get_user($id=false)
+	{
+		return $this->ci->ion_auth_model->get_user($id)->row();
+	}
+
+	/**
+	 * Get User by Email
+	 *
+	 * @return object User
+	 * @author Ben Edmunds
+	 **/
+	public function get_user_by_email($email)
+	{
+		return $this->ci->ion_auth_model->get_user_by_email($email)->row();
+	}
+
+	/**
+	 * Get Users by Email
+	 *
+	 * @return object Users
+	 * @author Ben Edmunds
+	 **/
+	public function get_users_by_email($email)
+	{
+		return $this->ci->ion_auth_model->get_users_by_email($email)->result();
+	}
+	
+	/**
+	 * Get User by Username
+	 *
+	 * @return object User
+	 * @author Kevin Smith
+	 **/
+	public function get_user_by_username($username)
+	{
+		return $this->ci->ion_auth_model->get_user_by_username($username)->row();
+	}
+
+	/**
+	 * Get Users by Username
+	 *
+	 * @return object Users
+	 * @author Kevin Smith
+	 **/
+	public function get_users_by_username($username)
+	{
+		return $this->ci->ion_auth_model->get_users_by_username($username)->result();
+	}
+	
+	/**
+	 * Get User by Identity
+	 *                              //copied from above ^
+	 * @return object User
+	 * @author jondavidjohn
+	 **/
+	public function get_user_by_identity($identity)
+	{
+		return $this->ci->ion_auth_model->get_user_by_identity($identity)->row();
+	}
+
+	/**
+	 * Get User as Array
+	 *
+	 * @return array User
+	 * @author Ben Edmunds
+	 **/
+	public function get_user_array($id=false)
+	{
+		return $this->ci->ion_auth_model->get_user($id)->row_array();
+	}
+
+
+	/**
+	 * update_user
+	 *
+	 * @return void
+	 * @author Phil Sturgeon
+	 **/
+	public function update_user($id, $data)
+	{
+		if ($this->ci->ion_auth_model->update_user($id, $data))
+		{
+			$this->set_message('update_successful');
+			return TRUE;
 		}
 
-		/**
-		 * if !all (default), false
-		 * if all, true
-		 */
-		return $check_all;
+		$this->set_error('update_unsuccessful');
+		return FALSE;
+	}
+
+
+	/**
+	 * delete_user
+	 *
+	 * @return void
+	 * @author Phil Sturgeon
+	 **/
+	public function delete_user($id)
+	{
+		if ($this->ci->ion_auth_model->delete_user($id))
+		{
+			$this->set_message('delete_successful');
+			return TRUE;
+		}
+
+		$this->set_error('delete_unsuccessful');
+		return FALSE;
+	}
+
+
+	/**
+	 * extra_where
+	 *
+	 * Crazy function that allows extra where field to be used for user fetching/unique checking etc.
+	 * Basically this allows users to be unique based on one other thing than the identifier which is helpful
+	 * for sites using multiple domains on a single database.
+	 *
+	 * @return void
+	 * @author Phil Sturgeon
+	 **/
+	public function extra_where()
+	{
+		$where =& func_get_args();
+
+		$this->_extra_where = count($where) == 1 ? $where[0] : array($where[0] => $where[1]);
+	}
+
+	/**
+	 * extra_set
+	 *
+	 * Set your extra field for registration
+	 *
+	 * @return void
+	 * @author Phil Sturgeon
+	 **/
+	public function extra_set()
+	{
+		$set =& func_get_args();
+
+		$this->_extra_set = count($set) == 1 ? $set[0] : array($set[0] => $set[1]);
+	}
+
+	/**
+	 * set_message_delimiters
+	 *
+	 * Set the message delimiters
+	 *
+	 * @return void
+	 * @author Ben Edmunds
+	 **/
+	public function set_message_delimiters($start_delimiter, $end_delimiter)
+	{
+		$this->message_start_delimiter = $start_delimiter;
+		$this->message_end_delimiter   = $end_delimiter;
+
+		return TRUE;
+	}
+
+	/**
+	 * set_error_delimiters
+	 *
+	 * Set the error delimiters
+	 *
+	 * @return void
+	 * @author Ben Edmunds
+	 **/
+	public function set_error_delimiters($start_delimiter, $end_delimiter)
+	{
+		$this->error_start_delimiter = $start_delimiter;
+		$this->error_end_delimiter   = $end_delimiter;
+
+		return TRUE;
+	}
+
+	/**
+	 * set_message
+	 *
+	 * Set a message
+	 *
+	 * @return void
+	 * @author Ben Edmunds
+	 **/
+	public function set_message($message)
+	{
+		$this->messages[] = $message;
+
+		return $message;
+	}
+
+	/**
+	 * messages
+	 *
+	 * Get the messages
+	 *
+	 * @return void
+	 * @author Ben Edmunds
+	 **/
+	public function messages()
+	{
+		$_output = '';
+		foreach ($this->messages as $message)
+		{
+			$_output .= $this->message_start_delimiter . $this->ci->lang->line($message) . $this->message_end_delimiter;
+		}
+
+		return $_output;
+	}
+
+	/**
+	 * set_error
+	 *
+	 * Set an error message
+	 *
+	 * @return void
+	 * @author Ben Edmunds
+	 **/
+	public function set_error($error)
+	{
+		$this->errors[] = $error;
+
+		return $error;
+	}
+
+	/**
+	 * errors
+	 *
+	 * Get the error message
+	 *
+	 * @return void
+	 * @author Ben Edmunds
+	 **/
+	public function errors()
+	{
+		$_output = '';
+		foreach ($this->errors as $error)
+		{
+			$_output .= $this->error_start_delimiter . $this->ci->lang->line($error) . $this->error_end_delimiter;
+		}
+
+		return $_output;
 	}
 
 }
